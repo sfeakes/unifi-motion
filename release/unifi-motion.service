@@ -1,0 +1,15 @@
+[Unit]
+Description=Log file watcher to post unifi-video motion to domoticz using MQTT
+After=syslog.target network-online.target
+
+[Service]
+Type=simple
+User=unifi-video
+EnvironmentFile=/etc/default/unifi-motion
+ExecStart=/usr/local/bin/unifi-motion $OPTS
+Restart=on-failure
+RestartSec=10
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

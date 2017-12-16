@@ -1,0 +1,7 @@
+# Defaults / Configuration options for unifi-motion
+#
+# -c config file
+# -lm log motion events to syslog
+#
+
+OPTS= -c /etc/unifi-motion.conf -lm
