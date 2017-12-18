@@ -9,6 +9,7 @@
 
 #include "mongoose.h"
 
+
 #define MAX_CAMERAS 10
 #define JSON_MQTT_MSG_SIZE 100
 #define LABEL_LEN 30
@@ -22,7 +23,9 @@
 #define LOG(...) {}
 #endif
 
-typedef int FD;
+//typedef int FD;
+
+//static FILE *_log_fp = NULL;
 
 static char *_mqtt_address = "localhost:1883";
 static char *_mqtt_user = NULL;
@@ -30,12 +33,14 @@ static char *_mqtt_passwd = NULL;
 static char *_mqtt_pub_topic = "domoticz/in";
 static char *_log_file_to_monitor = "/var/log/unifi-video/motion.log";
 static char *_regexString = ".*type:(start|stop) .*\\((.*)\\) .*";
-
 static char _mqtt_ID[20];
 
-static bool _mqtt_exit_flag = false;
+static char *_log_rotation_file = NULL;
+static long _log_rotation_size = 0;
 
+static bool _mqtt_exit_flag = false;
 struct mg_connection *_mqtt_connection;
+
 
 //static struct mg_mqtt_topic_expression s_topic_expr = {NULL, 0};
 
@@ -46,8 +51,12 @@ typedef struct
 }motion;
 
 motion *_motions[MAX_CAMERAS*2];
-
 int _numMotions = 0;
+
+typedef enum {openlog, closelog} openclose;
+
+FILE *log_file(openclose what);
+
 
 void log_message(char *format, ...)
 {
@@ -134,6 +143,10 @@ void readCfg (char *cfgFile)
               _log_file_to_monitor = cleanalloc(indx+1);
             } else if (strncasecmp (b_ptr, "log_regex", 9) == 0) {
               _regexString = cleanalloc(indx+1);
+            } else if (strncasecmp (b_ptr, "log_rotation_file", 17) == 0) {
+              _log_rotation_file = cleanalloc(indx+1);
+            } else if (strncasecmp (b_ptr, "log_rotation_size", 17) == 0) {
+              _log_rotation_size = strtoul(indx+1, NULL, 10);
             } else {
               *indx = 0;
               addMotion(cleanwhitespace(b_ptr), cleanwhitespace(indx+1));
@@ -154,6 +167,8 @@ void readCfg (char *cfgFile)
   LOG("CFG mqtt topic '%s'\n", _mqtt_pub_topic );
   LOG("CFG log to monitor topic '%s'\n", _log_file_to_monitor );
   LOG("CFG log regexp '%s'\n", _regexString );
+  LOG("CFG log rotation size '%ld'\n", _log_rotation_size );
+  LOG("CFG log rotation file '%s'\n", _log_rotation_file );
 }
 
 
@@ -260,8 +275,15 @@ void start_mqtt (struct mg_mgr *mgr) {
   _mqtt_exit_flag = false;
 }
 
-FILE *open_log() {
-  FILE *fd = NULL;
+
+FILE *logFile(openclose what) {
+  static FILE *fd = NULL;
+
+  if (what == closelog) {
+    if (fd != NULL)
+      fclose(fd);
+    return NULL;
+  }
 
   fd = fopen(_log_file_to_monitor, "r");
   
@@ -269,18 +291,55 @@ FILE *open_log() {
     fprintf( stderr, "Open log file '%s' error\n%s\n",_log_file_to_monitor,strerror (errno));
     exit(EXIT_FAILURE);
   }
-  
-  if (fseek(fd, 0L, SEEK_END) != 0) {
-    fprintf( stderr, "Seek to end of file log error\n%s\n",strerror (errno));
-  }
 
   return fd;
+}
+
+FILE *openLog(bool seekToEnd) {
+  FILE *fp;
+
+  fp = logFile(openlog);
+
+  if (seekToEnd) {
+    if (fseek(fp, 0L, SEEK_END) != 0) {
+      fprintf( stderr, "Seek to end of file log error\n%s\n",strerror (errno));
+    }
+  } else { // NSF
+    // Seek to END anyway, need to add code to just run back a few lines if the file is not 0.
+    // This get's called when the rotated log has changed size, so the new log *SHOULD* be blank,
+    // But incase we trigger too early or too late, we need to check file size and ack accordingly. 
+    if (fseek(fp, 0L, SEEK_END) != 0) {
+      fprintf( stderr, "Seek to end of file log error\n%s\n",strerror (errno));
+    }
+  }
+
+  return fp;
+}
+
+FILE *closeLog() {
+  return logFile(closelog);
+}
+
+long getRotatedLogsize() {
+  FILE *fdo;
+  int size=0;
+
+  if (_log_rotation_file != NULL && NULL == (fdo = fopen(_log_rotation_file, "r"))) {
+    fseek(fdo, 0, SEEK_END); // seek to end of file
+    size = ftell(fdo);
+    fclose(fdo);
+  }
+
+  return size;
 }
 
 void intHandler(int dummy) {
   int i;
   //keepRunning = 0;
   fprintf( stderr, "System exit, cleaning up\n");
+
+  closeLog();
+
   if (_mqtt_exit_flag != true)
     mg_mqtt_disconnect(_mqtt_connection);
 
@@ -310,6 +369,7 @@ int main(int argc, char *argv[]) {
   regmatch_t groupArray[maxGroups];
   bool readConfig = false;
   bool logMotion = false;
+  long oldLogFileSize = 0; 
 
   for (i = 1; i < argc; i++) {
     if (strcmp(argv[i], "-c") == 0) {
@@ -331,6 +391,8 @@ int main(int argc, char *argv[]) {
 
   signal(SIGINT, intHandler);
 
+  oldLogFileSize = getRotatedLogsize();
+
   if (regcomp(&regexCompiled, _regexString, REG_EXTENDED)) {
     fprintf( stderr, "Error: Could not compile regular expression.\n");
     exit(EXIT_FAILURE);
@@ -343,7 +405,7 @@ int main(int argc, char *argv[]) {
   LOG("Connecting to mqtt at '%s'\n", _mqtt_address );
 
   start_mqtt(&mgr);
-  fd = open_log();
+  fd = openLog(true);
 
   fprintf(stderr, "Monotoring log %s, events to mqtt %s\n", _log_file_to_monitor, _mqtt_address);
 
@@ -371,8 +433,18 @@ int main(int argc, char *argv[]) {
           }
         }
       }
+      // See if we start looking for a backup file.
+      if ( _log_rotation_size > 0 && _log_rotation_file != NULL && _log_rotation_size <= ftell(fd) ) {
+        LOG("Log Size is getting close to rotation size %d. Moniotring rotated log for changes\n", ftell(fd));
+        if ( getRotatedLogsize() != oldLogFileSize )
+        {
+          fprintf(stderr, "Rotated log changed filesize, reopening log\n");
+          oldLogFileSize = getRotatedLogsize();
+          fd = closeLog();
+          fd = openLog(false);
+        }
+      }
       mg_mgr_poll(&mgr, 500);
-      
     }
     sleep(1);
     LOG("Reset connections\n");
@@ -380,7 +452,7 @@ int main(int argc, char *argv[]) {
       start_mqtt(&mgr);
     }
     if (fd == NULL) {
-      fd = open_log();
+      fd = openLog(true);
     }
       
   }

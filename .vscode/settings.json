@@ -1,5 +1,8 @@
 {
     "terminal.integrated.env.osx": {
         "PATH": "/Users/sf/.platformio/penv/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/Users/sf/bin"
+    },
+    "files.associations": {
+        "stdexcept": "c"
     }
 }

@@ -1,6 +1,6 @@
 
 # define the C compiler to use
-CC = gcc
+CC = gcc -O3
 
 # Uncomment for extra logging
 #LOGGING = -D LOGGING_ENABLED
