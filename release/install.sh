@@ -31,13 +31,13 @@ cp $BUILD/$BIN $BINLocation/$BIN
 cp $BUILD/$SRV $SRVLocation/$SRV
 
 if [ -f $CFGLocation/$CFG ]; then
-  echo "Old config exists, did not copy new config, you may need to edit existing"
+  echo "Config exists, leaving alone! You may need to edit existing $CFGLocation/$CFG"
 else
   cp $BUILD/$CFG $CFGLocation/$CFG
 fi
 
 if [ -f $DEFLocation/$DEF ]; then
-  echo "Old defaukts exists, leaving"
+  echo "Defaults exists, leaving alone! $DEFLocation/$DEF"
 else
   cp $BUILD/$DEF.defaults $DEFLocation/$DEF
 fi
