@@ -3,7 +3,9 @@
 CC = gcc -O3
 
 # Uncomment for extra logging
+LOGGING =
 #LOGGING = -D LOGGING_ENABLED
+#LOGGING = -D LOGGING_ENABLED -D DEBUG_LOGGING_ENABLED
 
 # debug of not
 #$DBG = -g

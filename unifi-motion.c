@@ -5,7 +5,13 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <sys/ioctl.h>
-#include <linux/if.h>
+//#include <linux/if.h>
+#include <sys/inotify.h>
+#include <net/if.h>
+
+
+#include <unistd.h>
+#include <sys/poll.h>
 
 #include "mongoose.h"
 
@@ -17,15 +23,22 @@
 #define MAXCFGLINE 1024 
 #define DELIM "="
 
+#define EVENT_SIZE  ( sizeof (struct inotify_event) )
+#define BUF_LEN     ( 1024 * ( EVENT_SIZE + 16 ) )
+
+#define LOGFILE_OPEN_TRIES 5
+
 #ifdef LOGGING_ENABLED
 #define LOG(fmt, ...) log_message (fmt, ##__VA_ARGS__)
 #else
 #define LOG(...) {}
 #endif
 
-//typedef int FD;
-
-//static FILE *_log_fp = NULL;
+#ifdef DEBUG_LOGGING_ENABLED
+#define DLOG(fmt, ...) log_message (fmt, ##__VA_ARGS__)
+#else
+#define DLOG(...) {}
+#endif
 
 static char *_mqtt_address = "localhost:1883";
 static char *_mqtt_user = NULL;
@@ -35,28 +48,35 @@ static char *_log_file_to_monitor = "/var/log/unifi-video/motion.log";
 static char *_regexString = ".*type:(start|stop) .*\\((.*)\\) .*";
 static char _mqtt_ID[20];
 
-static char *_log_rotation_file = NULL;
-static long _log_rotation_size = 0;
+static char *_watchDir;
+static char *_watchFile;
 
-static bool _mqtt_exit_flag = false;
-struct mg_connection *_mqtt_connection;
-
+//static bool _mqtt_exit_flag = false;
+static struct mg_connection *_mqtt_connection;
+static regex_t _regexCompiled;
 
 //static struct mg_mqtt_topic_expression s_topic_expr = {NULL, 0};
 
-typedef struct 
-{
+typedef struct {
    char name[LABEL_LEN]; // 100 character array
    char action[JSON_MQTT_MSG_SIZE]; // 100 character array
-}motion;
+} umotion;
 
-motion *_motions[MAX_CAMERAS*2];
-int _numMotions = 0;
+typedef struct {
+  FILE *logfile;
+  int trigger;
+  int descriptor;
+} umwHandles;
 
-typedef enum {openlog, closelog} openclose;
+typedef enum {mqttstarting, mqttrunning, mqttstopped} mqttstatus;
 
-FILE *log_file(openclose what);
+static umotion *_motions[MAX_CAMERAS*2];
+static int _numMotions = 0;
+static umwHandles _umHandles;
+static mqttstatus _mqtt_status = mqttstopped;
 
+
+void cleanup();
 
 void log_message(char *format, ...)
 {
@@ -72,7 +92,7 @@ bool addMotion(char *name, char *action) {
   if (_numMotions > MAX_CAMERAS*2)
     return false;
 
-  _motions[_numMotions] = (motion *)malloc(sizeof(motion));
+  _motions[_numMotions] = (umotion *)malloc(sizeof(umotion));
 
   strncpy(_motions[_numMotions]->name, name, LABEL_LEN);
   strncpy(_motions[_numMotions]->action, action, JSON_MQTT_MSG_SIZE);
@@ -143,10 +163,6 @@ void readCfg (char *cfgFile)
               _log_file_to_monitor = cleanalloc(indx+1);
             } else if (strncasecmp (b_ptr, "log_regex", 9) == 0) {
               _regexString = cleanalloc(indx+1);
-            } else if (strncasecmp (b_ptr, "log_rotation_file", 17) == 0) {
-              _log_rotation_file = cleanalloc(indx+1);
-            } else if (strncasecmp (b_ptr, "log_rotation_size", 17) == 0) {
-              _log_rotation_size = strtoul(indx+1, NULL, 10);
             } else {
               *indx = 0;
               addMotion(cleanwhitespace(b_ptr), cleanwhitespace(indx+1));
@@ -161,33 +177,67 @@ void readCfg (char *cfgFile)
     exit (EXIT_FAILURE);
   }
 
+  int i;
+
+  for (i=strlen(_log_file_to_monitor); i > 0; i--) {
+    if (_log_file_to_monitor[i] == '/') {
+      _watchDir = malloc(sizeof(char) * (i+1));
+      _watchFile = malloc(sizeof(char) * ( (strlen(_log_file_to_monitor)-i)+1 ) );
+      strncpy(_watchDir, _log_file_to_monitor, i);
+      strcpy(_watchFile, &_log_file_to_monitor[i+1]);
+      break;
+    }
+  }
+
   LOG("CFG mqtt address '%s'\n", _mqtt_address );
   LOG("CFG mqtt user '%s'\n", _mqtt_user );
   LOG("CFG mqtt passwd '%s'\n", _mqtt_passwd );
   LOG("CFG mqtt topic '%s'\n", _mqtt_pub_topic );
-  LOG("CFG log to monitor topic '%s'\n", _log_file_to_monitor );
   LOG("CFG log regexp '%s'\n", _regexString );
-  LOG("CFG log rotation size '%ld'\n", _log_rotation_size );
-  LOG("CFG log rotation file '%s'\n", _log_rotation_file );
+
+  LOG("CFG log to monitor '%s'\n", _log_file_to_monitor );
+  LOG("CFG watch filename '%s'\n", _watchFile );
+  LOG("CFG watch directory '%s'\n", _watchDir );
+
 }
 
-
-bool mac(char *iface, char *buf, int len) {
+ // Find the first network interface with valid MAC and put mac address into buffer upto length
+bool mac(char *buf, int len)
+{
   struct ifreq s;
   int fd = socket(PF_INET, SOCK_DGRAM, IPPROTO_IP);
+  struct if_nameindex *if_nidxs, *intf;
 
-  strcpy(s.ifr_name, iface);
-  if (0 == ioctl(fd, SIOCGIFHWADDR, &s)) {
-    int i;
-    for (i = 0; i < 6 && i * 2 < len; ++i) {
-      // printf(":%02x", (unsigned char) s.ifr_addr.sa_data[i]);
-      sprintf(&buf[i * 2], "%02x", (unsigned char)s.ifr_addr.sa_data[i]);
+  if_nidxs = if_nameindex();
+  if (if_nidxs != NULL)
+  {
+    for (intf = if_nidxs; intf->if_index != 0 || intf->if_name != NULL; intf++)
+    {
+      strcpy(s.ifr_name, intf->if_name);
+      if (0 == ioctl(fd, SIOCGIFHWADDR, &s))
+      {
+        int i;
+        if ( s.ifr_addr.sa_data[0] == 0 &&
+             s.ifr_addr.sa_data[1] == 0 &&
+             s.ifr_addr.sa_data[2] == 0 &&
+             s.ifr_addr.sa_data[3] == 0 &&
+             s.ifr_addr.sa_data[4] == 0 &&
+             s.ifr_addr.sa_data[5] == 0 ) {
+          continue;
+        }
+        for (i = 0; i < 6 && i * 2 < len; ++i)
+        {
+          sprintf(&buf[i * 2], "%02x", (unsigned char)s.ifr_addr.sa_data[i]);
+        }
+        return true;
+      }
     }
-    return true;
   }
+
   return false;
 }
 
+// Need to update network interface.
 char *generate_mqtt_id(char *buf, int len) {
   extern char *__progname; // glibc populates this
   int i;
@@ -196,8 +246,9 @@ char *generate_mqtt_id(char *buf, int len) {
 
   if (i < len) {
     buf[i++] = '_';
-    if (!mac("wlan0", &buf[i], len - i)) {
-      mac("eth0", &buf[i], len - i);
+    // If we can't get MAC to pad mqtt id then use PID
+    if (!mac(&buf[i], len - i)) {
+      sprintf(&buf[i], "%.*d", (len-i), getpid());
     }
   }
   buf[len] = '\0';
@@ -208,7 +259,8 @@ char *generate_mqtt_id(char *buf, int len) {
 void send_mqtt_msg(struct mg_connection *nc, char *message) {
   static uint16_t msg_id = 0;
 
-  if ( _mqtt_exit_flag == true || _mqtt_connection == NULL) {
+  if ( _mqtt_status == mqttstopped || _mqtt_connection == NULL) {
+  //if ( _mqtt_exit_flag == true || _mqtt_connection == NULL) {
     fprintf(stderr, "ERROR: No mqtt connection, can't send message '%s'\n", message);
     return;
   }
@@ -233,7 +285,8 @@ static void ev_handler(struct mg_connection *nc, int ev, void *p) {
 
   switch (ev) {
     case MG_EV_CONNECT: {
-      _mqtt_exit_flag = false;
+      //_mqtt_exit_flag = false;
+      _mqtt_status = mqttrunning;
       //set_mqtt_cn(nc);
       struct mg_send_mqtt_handshake_opts opts;
       memset(&opts, 0, sizeof(opts));
@@ -249,7 +302,8 @@ static void ev_handler(struct mg_connection *nc, int ev, void *p) {
     case MG_EV_MQTT_CONNACK:
       if (msg->connack_ret_code != MG_EV_MQTT_CONNACK_ACCEPTED) {
         LOG("Got mqtt connection error: %d\n", msg->connack_ret_code);
-        _mqtt_exit_flag = true;
+        //_mqtt_exit_flag = true;
+        _mqtt_status = mqttstopped;
         _mqtt_connection = NULL;
       }
     break;
@@ -258,7 +312,8 @@ static void ev_handler(struct mg_connection *nc, int ev, void *p) {
     break;
     case MG_EV_CLOSE:
       fprintf( stderr, "MQTT Connection closed\n");
-      _mqtt_exit_flag = true;
+      //_mqtt_exit_flag = true;
+      _mqtt_status = mqttstopped;
       _mqtt_connection = NULL;
     break;
   }
@@ -272,104 +327,152 @@ void start_mqtt (struct mg_mgr *mgr) {
     fprintf(stderr, "mg_connect(%s) failed\n", _mqtt_address);
     exit(EXIT_FAILURE);
   }
-  _mqtt_exit_flag = false;
+  //_mqtt_exit_flag = false;
+  _mqtt_status = mqttstarting;
 }
 
-
-FILE *logFile(openclose what) {
-  static FILE *fd = NULL;
-
-  if (what == closelog) {
-    if (fd != NULL)
-      fclose(fd);
-    return NULL;
+void close_log(FILE *log) {
+  if (log != NULL) {
+    fclose(log);
+  } else if (_umHandles.logfile != NULL) {
+    fclose(_umHandles.logfile);
   }
-
-  fd = fopen(_log_file_to_monitor, "r");
-  
-  if (fd == NULL) {
-    fprintf( stderr, "Open log file '%s' error\n%s\n",_log_file_to_monitor,strerror (errno));
-    exit(EXIT_FAILURE);
-  }
-
-  return fd;
 }
 
-FILE *openLog(bool seekToEnd) {
-  FILE *fp;
+FILE *open_log(bool seekBackOneLine)
+{
+  FILE *fp = NULL;
+  int i=0;
 
-  fp = logFile(openlog);
-
-  if (seekToEnd) {
-    if (fseek(fp, 0L, SEEK_END) != 0) {
-      fprintf( stderr, "Seek to end of file log error\n%s\n",strerror (errno));
+  // NSF Need to put a pause look in here and try again a few times, to overcome logrotate
+  // delay in creating a new file.
+  while (fp == NULL)
+  {
+    if ( NULL != (fp = fopen(_log_file_to_monitor, "r")))
+      break;
+    
+    i++;
+    fprintf(stderr, "Open log file '%s' error\n%s\n", _log_file_to_monitor, strerror(errno));
+    
+    if (i > LOGFILE_OPEN_TRIES) {
+      fprintf(stderr, "ERROR: Can't open logfile '%s', giving up\n", _log_file_to_monitor);
+      cleanup();
+      exit(EXIT_FAILURE);
     }
-  } else { // NSF
-    // Seek to END anyway, need to add code to just run back a few lines if the file is not 0.
-    // This get's called when the rotated log has changed size, so the new log *SHOULD* be blank,
-    // But incase we trigger too early or too late, we need to check file size and ack accordingly. 
-    if (fseek(fp, 0L, SEEK_END) != 0) {
-      fprintf( stderr, "Seek to end of file log error\n%s\n",strerror (errno));
-    }
+    
+    sleep(1);
   }
 
+  if (seekBackOneLine == false)
+  {
+    if (fseek(fp, 0L, SEEK_END) != 0)
+    {
+      fprintf(stderr, "Seek to end of file log error\n%s\n", strerror(errno));
+    }
+  }
+  else
+  {
+    char c;
+    fseek(fp, -1, SEEK_END); //next to last char, last is EOF
+    c = fgetc(fp);
+    
+    while (c == '\n') //define macro EOL
+    {
+      if (fseek(fp, -2, SEEK_CUR) != 0){break;}
+      c = fgetc(fp);
+    }
+    while (c != '\n')
+    {
+      //fseek(fp, -2, SEEK_CUR);
+      if (fseek(fp, -2, SEEK_CUR) != 0){break;}
+      //++len;
+      c = fgetc(fp);
+    }
+    if (c == '\n')
+      fseek(fp, 1, SEEK_CUR);
+  }
+
+  _umHandles.logfile = fp;
   return fp;
 }
 
-FILE *closeLog() {
-  return logFile(closelog);
-}
-
-long getRotatedLogsize() {
-  FILE *fdo;
-  int size=0;
-
-  if (_log_rotation_file != NULL && NULL == (fdo = fopen(_log_rotation_file, "r"))) {
-    fseek(fdo, 0, SEEK_END); // seek to end of file
-    size = ftell(fdo);
-    fclose(fdo);
-  }
-
-  return size;
-}
-
-void intHandler(int dummy) {
+void cleanup() {
   int i;
-  //keepRunning = 0;
-  fprintf( stderr, "System exit, cleaning up\n");
 
-  closeLog();
+  close_log(_umHandles.logfile);
+  inotify_rm_watch(_umHandles.trigger, _umHandles.descriptor);
 
-  if (_mqtt_exit_flag != true)
+  if (_mqtt_status == mqttrunning && _mqtt_connection != NULL)
     mg_mqtt_disconnect(_mqtt_connection);
 
   for (i=0; i<_numMotions; i++){
     free(_motions[i]);
   }
+
   free(_mqtt_address);
   free(_mqtt_user);
   free(_mqtt_passwd);
   free(_mqtt_pub_topic);
   free(_log_file_to_monitor);
   free(_regexString);
+  free(_watchDir);
+  free(_watchFile);
+}
 
+void intHandler(int dummy) {
+  
+  fprintf( stderr, "System exit, cleaning up\n");
+  cleanup();
   exit(0);
+}
+
+int action_log_changes(FILE *fp, bool logMotion) {
+  char *line = NULL;
+  size_t len = 0;
+  ssize_t read_size;
+  size_t maxGroups = 3;
+  regmatch_t groupArray[maxGroups];
+  static char buf[LABEL_LEN];
+  int lc = 0;
+
+  while ((read_size = getline(&line, &len, fp)) != -1) {
+    DLOG("Read from log:-\n  %s", line);
+    lc++;
+    if (regexec(&_regexCompiled, line, maxGroups, groupArray, 0) == 0) {
+      if (groupArray[2].rm_so == (size_t)-1) {
+        DLOG("No regexp from log file\n");
+      } else {
+        sprintf(buf, "%.*s:%.*s", (groupArray[1].rm_eo - groupArray[1].rm_so), (line + groupArray[1].rm_so), (groupArray[2].rm_eo - groupArray[2].rm_so),
+                (line + groupArray[2].rm_so));
+        LOG("regexp from log file '%s'\n", buf);
+        int i;
+        for (i = 0; i < _numMotions; i++) {
+          if (strcmp(_motions[i]->name, buf) == 0) {
+            DLOG("Motion match found\n");
+            send_mqtt_msg(_mqtt_connection, _motions[i]->action);
+            if (logMotion)
+              fprintf(stderr, "Motion seen %s\n", buf);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  return lc;
 }
 
 int main(int argc, char *argv[]) {
   struct mg_mgr mgr;
-  FILE *fd = NULL;
-  char *line = NULL;
-  char buf[LABEL_LEN];
-  size_t len = 0;
-  ssize_t read;
+  //FILE *fp = NULL;
+  //int fd;
   int i;
-  size_t maxGroups = 3;
-  regex_t regexCompiled;
-  regmatch_t groupArray[maxGroups];
   bool readConfig = false;
+  //int wd;
+  char buffer[BUF_LEN];
+  int length;
+  int retval;
   bool logMotion = false;
-  long oldLogFileSize = 0; 
 
   for (i = 1; i < argc; i++) {
     if (strcmp(argv[i], "-c") == 0) {
@@ -381,80 +484,94 @@ int main(int argc, char *argv[]) {
   }
 
   if (readConfig != true) {
-    fprintf( stderr, "Error: Must pass config file on cmd line, example:-\n    %s -c %s.conf.\n",argv[0],argv[0]);
+    fprintf(stderr, "Error: Must pass config file on cmd line, example:-\n    %s -c %s.conf.\n", argv[0], argv[0]);
     exit(EXIT_FAILURE);
   }
   if (_numMotions <= 0) {
-    fprintf( stderr, "Error: No motion actions found, please check config file.\n");
+    fprintf(stderr, "Error: No motion actions found, please check config file.\n");
     exit(EXIT_FAILURE);
   }
 
   signal(SIGINT, intHandler);
 
-  oldLogFileSize = getRotatedLogsize();
-
-  if (regcomp(&regexCompiled, _regexString, REG_EXTENDED)) {
-    fprintf( stderr, "Error: Could not compile regular expression.\n");
+  if (regcomp(&_regexCompiled, _regexString, REG_EXTENDED)) {
+    fprintf(stderr, "Error: Could not compile regular expression. %s\n", strerror(errno));
+    cleanup();
     exit(EXIT_FAILURE);
   };
 
   generate_mqtt_id(_mqtt_ID, 20);
-
   mg_mgr_init(&mgr, NULL);
-
-  LOG("Connecting to mqtt at '%s'\n", _mqtt_address );
-
+  LOG("Connecting to mqtt at '%s'\n", _mqtt_address);
   start_mqtt(&mgr);
-  fd = openLog(true);
+
+  _umHandles.trigger = inotify_init();
+  if (_umHandles.trigger < 0) {
+    fprintf(stderr, "ERROR Failed to register monitor with kernel. %s\n", strerror(errno));
+    cleanup();
+    exit(EXIT_FAILURE);
+  }
+
+  _umHandles.descriptor = inotify_add_watch(_umHandles.trigger, _watchDir, IN_MODIFY);
+  _umHandles.logfile = open_log(false);
+
+  // Set watch trigger for non-blocking poll
+  struct pollfd fds[1];
+  fds[0].fd = _umHandles.trigger;
+  fds[0].events = POLLIN;
 
   fprintf(stderr, "Monotoring log %s, events to mqtt %s\n", _log_file_to_monitor, _mqtt_address);
 
-  for (;;) {
-    while (_mqtt_exit_flag == false && fd != NULL) {
-      while ((read = getline(&line, &len, fd)) != -1) {
-        LOG("Read from log:-\n  %s", line);
-        if (regexec(&regexCompiled, line, maxGroups, groupArray, 0) == 0) {
-          if (groupArray[2].rm_so == (size_t)-1) {
-            LOG("No regexp from log file\n");
-          } else {
-            sprintf(buf, "%.*s:%.*s", (groupArray[1].rm_eo - groupArray[1].rm_so), (line + groupArray[1].rm_so), (groupArray[2].rm_eo - groupArray[2].rm_so),
-                    (line + groupArray[2].rm_so));
-            LOG("regexp from log file '%s'\n",buf);
-            int i;
-            for (i = 0; i < _numMotions; i++) {
-              if (strcmp(_motions[i]->name, buf) == 0) {
-                LOG("Motion match found\n");
-                send_mqtt_msg(_mqtt_connection, _motions[i]->action);
-                if (logMotion)
-                  fprintf(stderr, "Motion seen %s\n",buf);
-                break;
+  while (1) {
+    int i = 0;
+
+    if ( _mqtt_status == mqttstopped) {
+      LOG("Reset connections\n");
+      // Should put a pause in here after first try failed.
+      // Not putting it in yet untill debugged mqtt random disconnects.
+      start_mqtt(&mgr);
+    }
+    mg_mgr_poll(&mgr, 0);
+
+    retval = poll(fds, 1, 1000);
+    if (retval == -1)
+      fprintf(stderr, "Warning, system call poll() failed");
+    else if (!retval) { // trigger timeout.
+      DLOG(".");
+      continue;
+    } else { // trigger file action.
+      DLOG(":");
+    }
+
+    length = read(_umHandles.trigger, buffer, BUF_LEN);
+
+    if (length < 0) {
+      fprintf(stderr, "Warning system call read() failed");
+    } else if (length == 0) {
+      fprintf(stderr, "Warning system call read() returned blank");
+    }
+
+    while (i < length) {
+      struct inotify_event *event = (struct inotify_event *)&buffer[i];
+      if (event->len) {
+        if (event->mask & IN_MODIFY) {
+          if (!(event->mask & IN_ISDIR)) {
+            // LOG("The file %s was modified.\n", event->name );
+            if (strcmp(event->name, _watchFile) == 0) {
+              if (action_log_changes(_umHandles.logfile, logMotion) <= 0) {
+                fprintf(stderr, "No lines read, logfile may have been moved, re-opening:-\n");
+                close_log(_umHandles.logfile);
+                _umHandles.logfile = open_log(true);
+                action_log_changes(_umHandles.logfile, logMotion);
               }
             }
           }
         }
       }
-      // See if we start looking for a backup file.
-      if ( _log_rotation_size > 0 && _log_rotation_file != NULL && _log_rotation_size <= ftell(fd) ) {
-        LOG("Log Size is getting close to rotation size %d. Moniotring rotated log for changes\n", ftell(fd));
-        if ( getRotatedLogsize() != oldLogFileSize )
-        {
-          fprintf(stderr, "Rotated log changed filesize, reopening log\n");
-          oldLogFileSize = getRotatedLogsize();
-          fd = closeLog();
-          fd = openLog(false);
-        }
-      }
-      mg_mgr_poll(&mgr, 500);
+      i += EVENT_SIZE + event->len;
     }
-    sleep(1);
-    LOG("Reset connections\n");
-    if (_mqtt_exit_flag == true) {
-      start_mqtt(&mgr);
-    }
-    if (fd == NULL) {
-      fd = openLog(true);
-    }
-      
   }
-  return 0;
+
+  cleanup();
+  
 }
