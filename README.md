@@ -96,3 +96,12 @@ LOGGING =
 LOGGING = -D LOGGING_ENABLED
 LOGGING = -D DEBUG_LOGGING_ENABLED
 ```
+
+
+# Home Automation options
+
+The example coniguration is set to Domoticz.  Domoticz expects JSON over MQTT and uses IDX for the sensor identifyer and nvaule or 1 or 0 for on or off.  svalue is not needed, but I left it for any custom messages you may want to add.
+`{"idx":105,"nvalue":1,"svalue":""}`
+So in domoticz, just create a virtual motion censor, one for each camera, get the IDX and use that in the configuration.
+
+All other home automation hubs should be similar, and all have MQTT plug-ins / add-ons, but your on your own as to the exact configuration. 
