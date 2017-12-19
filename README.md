@@ -104,4 +104,9 @@ The example coniguration is set to Domoticz.  Domoticz expects JSON over MQTT an
 `{"idx":105,"nvalue":1,"svalue":""}`
 So in domoticz, just create a virtual motion censor, one for each camera, get the IDX and use that in the configuration.
 
-All other home automation hubs should be similar, and all have MQTT plug-ins / add-ons, but your on your own as to the exact configuration. 
+All other home automation hubs should be similar, and all have MQTT plug-ins / add-ons, but your on your own as to the exact configuration.
+
+
+## License
+
+See the [LICENSE](LICENSE.md) file for license rights and limitations (MIT).
