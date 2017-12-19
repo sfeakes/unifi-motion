@@ -28,17 +28,19 @@
 
 #define LOGFILE_OPEN_TRIES 5
 
-#ifdef LOGGING_ENABLED
-#define LOG(fmt, ...) log_message (fmt, ##__VA_ARGS__)
+#ifdef DEBUG_LOGGING_ENABLED
+  #define DLOG(fmt, ...) log_message (fmt, ##__VA_ARGS__)
+  #define LOGGING_ENABLED
 #else
-#define LOG(...) {}
+  #define DLOG(...) {}
 #endif
 
-#ifdef DEBUG_LOGGING_ENABLED
-#define DLOG(fmt, ...) log_message (fmt, ##__VA_ARGS__)
+#ifdef LOGGING_ENABLED
+  #define LOG(fmt, ...) log_message (fmt, ##__VA_ARGS__)
 #else
-#define DLOG(...) {}
+  #define LOG(...) {}
 #endif
+
 
 static char *_mqtt_address = "localhost:1883";
 static char *_mqtt_user = NULL;
