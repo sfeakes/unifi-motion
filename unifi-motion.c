@@ -185,6 +185,7 @@ void readCfg (char *cfgFile)
       _watchFile = malloc(sizeof(char) * ( (strlen(_log_file_to_monitor)-i)+1 ) );
       strncpy(_watchDir, _log_file_to_monitor, i);
       strcpy(_watchFile, &_log_file_to_monitor[i+1]);
+      _watchDir[i] = '\0';
       break;
     }
   }
