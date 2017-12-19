@@ -63,7 +63,9 @@ For custom log file monotoring, here are some details on how to use the regular 
 The regexp is expressed in POSIX regular expression format, and MUST have two groups. The output from those two groups will be used to match entries in this config file. The group output is merged together with the : character.
 
 So in the default config used here, unifi-video motion.log output is similar to :-
- ```1513373389.823 2017-12-15 15:29:49.823/CST: INFO Camera[000000000000] type:stop event:10386 clock:3286698801 (Front Door) in app-event-bus-1```
+ ```
+ 1513373389.823 2017-12-15 15:29:49.823/CST: INFO Camera[000000000000] type:stop event:10386 clock:3286698801 (Front Door) in app-event-bus-1
+ ```
 
 the regexp will look for characters that match either `start` or `stop` after the word `type:` and before the next space. That's group 1.
 Next the regexp will look for any text within () and that's group 2 output.
@@ -81,12 +83,16 @@ For the sake of speed and size, all logging information is stripped at compile t
 
 edit `/etc/defaults/unifi-motion` only option to change is `-lm`, that stands for Log Motion, with the flag matched items from the log file will get recorded in syslog, without it the process is silent except for errors & warnings.
 
+```
 OPTS= -c /etc/unifi-motion.conf -lm
+```
 
 ## Compile options
 
 Edit Makefile and uncomment one for the 3 for how much crap you want to know.
 
+```
 LOGGING =
 LOGGING = -D LOGGING_ENABLED
 LOGGING = -D DEBUG_LOGGING_ENABLED
+```
