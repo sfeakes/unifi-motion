@@ -16,13 +16,13 @@ This depends on systemd / systemctl to run as a service or daemon, if you have i
 configuration options :-
 
 Logfile to monitor
-```log_file = /var/lib/unifi-video/logs/motion.log```
+```log_file = /var/lib/unifi-video/logs/motion.log'''
 
 MQTT broker information
 ```mqtt_address = localhost:1883
 #mqtt_user = someusername    
 #mqtt_passwd = somepassword
-mqtt_pub_topic = domoticz/in```
+mqtt_pub_topic = domoticz/in'''
 
 What to match in the monitored logfile and the action to take.
 For unifi-video motion detection the example below is best.
@@ -39,19 +39,19 @@ start:Driveway = {"idx":107,"nvalue":1,"svalue":""}
 stop:Driveway = {"idx":107,"nvalue":0,"svalue":""}
 
 start:Back Garden = {"idx":108,"nvalue":1,"svalue":""}  
-stop:Back Garden = {"idx":108,"nvalue":0,"svalue":""}```
+stop:Back Garden = {"idx":108,"nvalue":0,"svalue":""}'''
 
 
 Regular Expression to use within the monitored log file. This is set for unifi-video motion.log, if that's what you are monitoring, leave it alone.
 
-```log_regex = .*type:(start|stop) .*\((.*)\) .*```
+```log_regex = .*type:(start|stop) .*\((.*)\) .*'''
 
 For custom log file monotoring, here are some details on how to use the regular expression.
 
 The regexp is expressed in POSIX regular expression format, and MUST have two groups. The output from those two groups will be used to match entries in this config file. The group output is merged together with the : character.
 
 So in the default config used here, unifi-video motion.log output is similar to :-
- ```1513373389.823 2017-12-15 15:29:49.823/CST: INFO Camera[000000000000] type:stop event:10386 clock:3286698801 (Front Door) in app-event-bus-1```
+ ```1513373389.823 2017-12-15 15:29:49.823/CST: INFO Camera[000000000000] type:stop event:10386 clock:3286698801 (Front Door) in app-event-bus-1'''
 
 the regexp will look for characters that match either ’start’ or ’stop’ after the word 'type:' and before the next space. That's group 1.
 Next the regexp will look for any text within () and that's group 2 output.
