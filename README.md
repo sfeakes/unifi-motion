@@ -20,7 +20,7 @@ Edit `/etc/unifi-motion.conf`
 ### Logfile to monitor
 
 ```
-log_file = /var/lib/unifi-video/logs/motion.log
+log_file = /var/log/unifi-video/motion.log
 ```
 
 ### MQTT broker information

@@ -18,7 +18,7 @@ CFLAGS = -Wall $(DBG) $(LIBS) $(LOGGING) $(MONGOOSE_CFLAGS)
 # Add inputs and outputs from these tool invocations to the build variables 
 
 # define the C source files
-SRCS = unifi-motion.c mongoose.c
+SRCS = unifi-motion.c mongoose.c config.c
 
 OBJS = $(SRCS:.c=.o)
 
