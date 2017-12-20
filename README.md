@@ -15,7 +15,7 @@ Other systems copy everything and use make to compile.
 This depends on systemd / systemctl to run as a service or daemon, if you have init.d system then you'll have't make your own `/etc/init.d/unifi-motion` script, but it shouldn't be too difficult.
 
 ## configuration options :-
-Edit `/etc/unifi-motion/conf`
+Edit `/etc/unifi-motion.conf`
 
 ### Logfile to monitor
 
